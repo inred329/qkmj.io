@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QKMJ Minimal Web Client (Big5)</title>
+  <!-- xterm.js 核心與樣式（CDN） -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.min.js"></script>
+  <!-- Big5 轉碼工具（encoding-japanese，支援 BIG5） -->
+  <script src="https://cdn.jsdelivr.net/npm/encoding-japanese/encoding.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0b0f14; color: #e6edf3; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans", "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .toolbar { display: flex; gap: .5rem; align-items: center; padding: .5rem .75rem; background: #0f1720; border-bottom: 1px solid #202938; }
+    .toolbar input { flex: 1; min-width: 12rem; background: #0b1220; color: #e6edf3; border: 1px solid #263245; padding: .4rem .55rem; border-radius: .4rem; }
+    .toolbar button { background: #1f6feb; color: white; border: 0; padding: .45rem .8rem; border-radius: .45rem; cursor: pointer; }
+    .toolbar button:disabled { opacity: .5; cursor: not-allowed; }
+    #term { height: calc(100% - 48px); padding: .5rem; }
+    .status { font-size: 12px; opacity: .8; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <label class="status">WS URL：</label>
+    <input id="wsUrl" placeholder="ws://34.80.124.13:8081/" />
+    <button id="btnConnect">Connect</button>
+    <span class="status" id="statusText">未連線</span>
+  </div>
+  <div id="term"></div>
+
+  <script>
+    // ====== 基本設定 ======
+    const defaultHost = location.hostname || "34.80.124.13";
+    const defaultWs = defaultHost ? `ws://${defaultHost}:8081/` : "ws://YOUR_IP:8081/";
+    const wsInput = document.getElementById('wsUrl');
+    wsInput.value = defaultWs;
+
+    const term = new window.Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: 'Consolas, Menlo, Monaco, "Courier New", monospace',
+      fontSize: 16,
+      theme: { background: '#0b0f14', foreground: '#e6edf3' }
+    });
+    const fitAddon = new window.FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('term'));
+    fitAddon.fit();
+    window.addEventListener('resize', () => fitAddon.fit());
+
+    const statusText = document.getElementById('statusText');
+    const btnConnect = document.getElementById('btnConnect');
+
+    let ws = null;
+
+    function setStatus(txt) { statusText.textContent = txt; }
+
+    // ---- Big5 轉碼工具 ----
+    function big5DecodeChunk(u8) {
+      // 優先使用 encoding-japanese
+      if (window.Encoding) {
+        return window.Encoding.convert(u8, { to: 'UNICODE', from: 'BIG5', type: 'string' });
+      }
+      try {
+        const dec = new TextDecoder('big5');
+        return dec.decode(u8);
+      } catch (_) {
+        return new TextDecoder().decode(u8); // 後備 UTF-8
+      }
+    }
+
+    function big5Encode(str) {
+      if (window.Encoding) {
+        return new Uint8Array(window.Encoding.convert(str, { to: 'BIG5', from: 'UNICODE', type: 'array' }));
+      }
+      return new TextEncoder().encode(str);
+    }
+
+    // ---- 解決「Big5 多位元字切包」：做訊框緩衝，避免多位元字被分割 ----
+    let rxBuf = new Uint8Array(0);
+
+    function appendBuffer(a, b) {
+      const out = new Uint8Array(a.length + b.length);
+      out.set(a, 0); out.set(b, a.length); return out;
+    }
+
+    function isLeadByte(byte) {
+      // Big5 前導位元：0x81–0xFE，但不含 0x7F；簡化處理
+      return (byte >= 0x81 && byte <= 0xFE);
+    }
+
+    function flushDecode() {
+      if (!rxBuf.length) return;
+      // 若最後一個位元是前導位元，先不要解，等下一包
+      if (isLeadByte(rxBuf[rxBuf.length - 1])) return;
+      term.write(big5DecodeChunk(rxBuf));
+      rxBuf = new Uint8Array(0);
+    }
+
+
+    function connect() {
+      const url = wsInput.value.trim();
+      if (!url) return;
+      try { new URL(url); } catch { setStatus('URL 無效'); return; }
+
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+      setStatus('連線中…');
+      btnConnect.disabled = true;
+
+      ws.onopen = () => { setStatus('已連線'); };
+
+const big5Decoder = new TextDecoder('big5');
+
+ws.onmessage = (ev) => {
+  if (ev.data instanceof ArrayBuffer) {
+    const text = big5Decoder.decode(new Uint8Array(ev.data), { stream: true });
+    if (text) term.write(text);
+  } else if (typeof ev.data === 'string') {
+    term.write(ev.data);
+  }
+};
+
+      ws.onclose = () => { setStatus('連線關閉'); btnConnect.disabled = false; };
+      ws.onerror = () => { setStatus('連線錯誤'); btnConnect.disabled = false; };
+    }
+
+    btnConnect.addEventListener('click', connect);
+
+    term.onData((data) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(big5Encode(data));
+    });
+
+    term.writeln('[1;36mQKMJ Minimal Web Client[0m');
+    term.writeln('請確認後端容器埠映射： -p 8080:80，且 GCP 防火牆已開 tcp:8080');
+    term.writeln('在上方輸入 ws://<你的外部IP>:8080/ 後按 Connect');
+  </script>
+</body>
+</html>
